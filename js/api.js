@@ -60,7 +60,31 @@
     return false;
   }
 
+  // Cache for Gate.io contract quanto_multipliers (fetched once from /contracts endpoint)
+  let _quantoMultiplierMap = null;
+
+  async function getQuantoMultiplierMap() {
+    if (_quantoMultiplierMap) return _quantoMultiplierMap;
+    try {
+      const contracts = await fetchWithTimeout('https://api.gateio.ws/api/v4/futures/usdt/contracts', {}, 5000);
+      if (Array.isArray(contracts)) {
+        _quantoMultiplierMap = {};
+        for (let i = 0; i < contracts.length; i++) {
+          const c = contracts[i];
+          _quantoMultiplierMap[c.name] = parseFloat(c.quanto_multiplier || '1');
+        }
+        return _quantoMultiplierMap;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch Gate.io contract specs for quanto_multiplier:', e);
+    }
+    return {};
+  }
+
   async function fetchAllMarkets() {
+    // 0. Pre-fetch quanto_multiplier map from Gate.io contracts endpoint
+    const quantoMap = await getQuantoMultiplierMap();
+
     // 1. Primary: Gate.io Futures Public API (CORS enabled, 1,050+ perpetual contracts)
     try {
       const gateTickers = await fetchWithTimeout('https://api.gateio.ws/api/v4/futures/usdt/tickers', {}, 3500);
@@ -87,7 +111,8 @@
 
           if (price > 0) {
             const mcap = global.ScannerData.getMarketCap(symbol, price);
-            const oiEstimatedM = t.total_size ? (parseFloat(t.total_size) * parseFloat(t.quanto_multiplier || '1') * price) / 1e6 : 0;
+            const qm = quantoMap[contract] || 1;
+            const oiEstimatedM = t.total_size ? (parseFloat(t.total_size) * qm * price) / 1e6 : 0;
             const oiToMcap = mcap > 0 ? ((oiEstimatedM * 1e6) / mcap) * 100 : 0;
 
             catalog.push({
@@ -124,60 +149,8 @@
       // Fallback to Binance
     }
 
-    // 2. Secondary: Binance Futures 24hr Ticker API
-    try {
-      const binanceTickers = await fetchWithTimeout('https://fapi.binance.com/fapi/v1/ticker/24hr', {}, 3500);
-      if (Array.isArray(binanceTickers) && binanceTickers.length > 30) {
-        const catalog = [];
-        for (let i = 0; i < binanceTickers.length; i++) {
-          const t = binanceTickers[i];
-          const symbol = t.symbol || '';
-          if (!symbol.endsWith('USDT')) continue;
-
-          const baseAsset = symbol.replace('USDT', '');
-          const price = parseFloat(t.lastPrice || '0');
-          const vol24hUsd = parseFloat(t.quoteVolume || '0');
-          const vol24hBase = parseFloat(t.volume || '0');
-          const changePct = parseFloat(t.priceChangePercent || '0');
-          const high24h = parseFloat(t.highPrice || '0');
-          const low24h = parseFloat(t.lowPrice || '0');
-
-          if (price > 0) {
-            const mcap = global.ScannerData.getMarketCap(symbol, price);
-            const oiEstimatedM = 0; // No OI data from Binance ticker, will be enriched by openInterest endpoint
-            const oiToMcap = mcap > 0 ? ((oiEstimatedM * 1e6) / mcap) * 100 : 0;
-
-            catalog.push({
-              symbol: symbol,
-              contract: baseAsset + '_USDT',
-              baseAsset: baseAsset,
-              name: baseAsset,
-              price: price,
-              vol24hUsd: vol24hUsd,
-              vol24hBase: vol24hBase,
-              change24h: changePct,
-              high24h: high24h,
-              low24h: low24h,
-              fundingPct: 0,
-              oiM: oiEstimatedM,
-              marketCap: mcap,
-              oiToMcapPct: oiToMcap,
-              source: 'binance'
-            });
-          }
-        }
-
-        catalog.sort(function (a, b) {
-          return b.vol24hUsd - a.vol24hUsd;
-        });
-
-        if (catalog.length > 0) {
-          return catalog;
-        }
-      }
-    } catch (binanceErr) {
-      // Fallback to offline catalog
-    }
+    // 2. Secondary: Binance Futures — DISABLED (CORS blocked on static hosting / GitHub Pages)
+    // If Gate.io is available, Binance is unnecessary. If Gate.io fails, fall through to offline catalog.
 
     // 3. Fallback: Pre-bundled catalog from ScannerData
     return (global.ScannerData && global.ScannerData.PRESET_MARKETS) || [];
@@ -298,7 +271,8 @@
       vol24hUsd: (shortPoolUsd + longPoolUsd) * 2.5,
       oiM: oiM,
       marketCap: global.ScannerData.getMarketCap(symbol, currentPrice),
-      fundingPct: -0.005,
+      fundingPct: 0,
+      fundingIsReal: false,
       high24h: currentPrice * 1.04,
       low24h: currentPrice * 0.96,
       candles: candles,
@@ -419,10 +393,11 @@
           const high24h = parseFloat(tItem.high_24h || '0');
           const low24h = parseFloat(tItem.low_24h || '0');
 
-          // Estimate Open Interest USD
+          // Estimate Open Interest USD using quanto_multiplier from contracts endpoint
           let oiM = 0;
           if (tItem.total_size) {
-            const multiplier = parseFloat(tItem.quanto_multiplier || '1');
+            const quantoMap = await getQuantoMultiplierMap();
+            const multiplier = quantoMap[gateContract] || 1;
             const oiTokens = parseFloat(tItem.total_size) * multiplier;
             oiM = (oiTokens * lastPrice) / 1e6;
           }
@@ -484,64 +459,8 @@
       // Continue to next provider
     }
 
-    // 2. Try Binance Futures (fapi.binance.com)
-    try {
-      const [premData, oiData, klinesData, ticker24h] = await Promise.all([
-        fetchWithTimeout('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=' + symbol, {}, 2500),
-        fetchWithTimeout('https://fapi.binance.com/fapi/v1/openInterest?symbol=' + symbol, {}, 2500),
-        fetchWithTimeout('https://fapi.binance.com/fapi/v1/klines?symbol=' + symbol + '&interval=' + interval + '&limit=40', {}, 2500),
-        fetchWithTimeout('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=' + symbol, {}, 2500)
-      ]);
-
-      const markPrice = Number(premData && premData.markPrice);
-      const fundingRate = Number(premData && premData.lastFundingRate);
-      const oiContracts = Number(oiData && oiData.openInterest);
-
-      if (Number.isFinite(markPrice) && markPrice > 0) {
-        const oiM = Number.isFinite(oiContracts) && oiContracts > 0
-          ? (oiContracts * markPrice) / 1e6
-          : 0;
-
-        const vol24hUsd = ticker24h ? parseFloat(ticker24h.quoteVolume || '0') : oiM * 2.5 * 1e6;
-        const vol24hBase = ticker24h ? parseFloat(ticker24h.volume || '0') : (vol24hUsd / markPrice);
-        const high24h = ticker24h ? parseFloat(ticker24h.highPrice || '0') : markPrice * 1.04;
-        const low24h = ticker24h ? parseFloat(ticker24h.lowPrice || '0') : markPrice * 0.96;
-
-        let candles = null;
-        if (Array.isArray(klinesData) && klinesData.length >= 10) {
-          candles = klinesData.map(function (k, idx) {
-            return {
-              index: idx,
-              time: Number(k[0]),
-              open: Number(k[1]),
-              high: Number(k[2]),
-              low: Number(k[3]),
-              close: Number(k[4]),
-              volBase: Number(k[5]),
-              volUsd: Number(k[7])
-            };
-          });
-        }
-
-        return {
-          symbol: symbol,
-          baseAsset: baseAsset,
-          price: markPrice,
-          vol24hUsd: vol24hUsd,
-          vol24hBase: vol24hBase,
-          oiM: oiM,
-          marketCap: global.ScannerData.getMarketCap(symbol, markPrice),
-          fundingPct: Number.isFinite(fundingRate) ? fundingRate * 100 : -0.005,
-          high24h: high24h,
-          low24h: low24h,
-          candles: candles,
-          sourceLabel: 'Binance Futures Live',
-          isLive: true
-        };
-      }
-    } catch (binanceErr) {
-      // Continue to OKX
-    }
+    // 2. Binance Futures — DISABLED (CORS blocked on static hosting / GitHub Pages)
+    // Skip directly to OKX
 
     // 3. Try OKX Swap (okx.com)
     try {
@@ -590,7 +509,8 @@
           vol24hBase: vol24hBase,
           oiM: oiM,
           marketCap: global.ScannerData.getMarketCap(symbol, lastPrice),
-          fundingPct: Number.isFinite(fRate) ? fRate * 100 : -0.004,
+          fundingPct: Number.isFinite(fRate) ? fRate * 100 : 0,
+          fundingIsReal: Number.isFinite(fRate) && fRate !== 0,
           high24h: Number(tItem.high24h) || lastPrice * 1.04,
           low24h: Number(tItem.low24h) || lastPrice * 0.96,
           candles: candles,

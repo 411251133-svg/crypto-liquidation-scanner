@@ -368,9 +368,19 @@
       statusDot.className = 'status-dot live';
       statusText.textContent = 'LIVE PERP FEED';
     } else {
-      statusPill.className = 'badge badge-cyan';
-      statusDot.className = 'status-dot';
-      statusText.textContent = 'MODELED / PRESET ENGINE';
+      statusPill.className = 'badge badge-amber';
+      statusDot.className = 'status-dot offline';
+      statusText.textContent = '⚠ OFFLINE — Using Estimated Data';
+    }
+
+    // Show/hide offline warning banner
+    const offlineBanner = document.getElementById('offlineWarningBanner');
+    if (offlineBanner) {
+      if (m.isLive) {
+        offlineBanner.classList.add('hidden');
+      } else {
+        offlineBanner.classList.remove('hidden');
+      }
     }
 
     document.getElementById('activePairHeaderBadge').textContent =
