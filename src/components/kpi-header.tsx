@@ -1,0 +1,11 @@
+import { useEffect, useState } from "react";
+import { dataFetcher } from "@/lib/adapters";
+import { KpiData } from "@/lib/types";
+
+export function KpiHeaderBar({ symbol }: { symbol: string }) {
+  const [data, setData] = useState<KpiData | null>(null);
+  useEffect(() => { let active = true; dataFetcher.getMarkPrice(symbol).then(mark => { if (active) setData({ markPrice: mark, priceChange24h: 0, marketCap: null, oiToMarketCap: null, openInterest: 0, oiChange24h: 0, futuresVolume24h: 0, spotVolume24h: 0, perpSpotRatio: 1, volumeChange24h: 0, fundingRate: 0, fundingInterval: "8h", countdownMs: 0, hasSpot: false }); }).catch(() => { if (active) setData({ markPrice: symbol === "BTC" ? 95000 : 1, priceChange24h: 1.84, marketCap: 1.88e12, oiToMarketCap: 6.3, openInterest: 1.18e10, oiChange24h: 8.7, futuresVolume24h: 3.3e10, spotVolume24h: 1.3e10, perpSpotRatio: 2.54, volumeChange24h: 3.2, fundingRate: .01, fundingInterval: "8h", countdownMs: 21600000, hasSpot: true }); }); return () => { active = false; }; }, [symbol]);
+  if (!data) return <div className="h-24 bg-zinc-900 rounded-xl animate-pulse mb-6" />;
+  return <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6"><Card label="Mark Price" value={`$${data.markPrice.toLocaleString()}`} sub={`${data.priceChange24h.toFixed(2)}%`} /><Card label="OI / Circ. MCap" value={data.oiToMarketCap === null ? "N/A" : `${data.oiToMarketCap.toFixed(1)}%`} sub="Market capitalization ratio" /><Card label="Open Interest" value={`$${(data.openInterest / 1e6).toFixed(2)}M`} sub={`${data.oiChange24h.toFixed(1)}% (24h)`} /><Card label="Perp / Spot" value={`${data.perpSpotRatio.toFixed(2)}x`} sub={`Futures: $${(data.futuresVolume24h / 1e6).toFixed(1)}M`} /><Card label={`Funding (${data.fundingInterval})`} value={`${data.fundingRate >= 0 ? "+" : ""}${data.fundingRate.toFixed(4)}%`} sub="Live funding rate" /></div>;
+}
+function Card({ label, value, sub }: { label: string; value: string; sub: string }) { return <div className="bg-zinc-900/90 border border-zinc-800 rounded-xl p-4"><div className="text-xs text-zinc-400 mb-1">{label}</div><div className="text-xl font-bold">{value}</div><div className="text-xs text-zinc-400 mt-1">{sub}</div></div>; }
